@@ -65,8 +65,11 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [loading, setLoading] = useState(true);
   // Factor id captured while we wait for the user to enter a TOTP code.
   const pendingFactorId = useRef<string | null>(null);
-  // Avoid opening the backend session twice for the same access token.
+  // Access token for which the backend session has already been opened.
   const sessionedToken = useRef<string | null>(null);
+  // In-flight POST /auth/session, so concurrent callers (signIn / verifyMfa /
+  // onAuthStateChange) share a single request and all observe its real outcome.
+  const inflightSession = useRef<Promise<void> | null>(null);
 
   const mfaSatisfied = useMemo(() => {
     if (!session || !role) return false;
@@ -80,11 +83,23 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   }, []);
 
   // Open (or refresh) the backend Redis session for the current access token.
+  // Throws if the backend call fails — callers must NOT mark the user signed in
+  // unless this resolves. Concurrent callers de-duplicate onto one request.
   const ensureBackendSession = useCallback(async (s: Session | null) => {
     if (!s) return;
     if (sessionedToken.current === s.access_token) return;
-    await api.post('/auth/session');
-    sessionedToken.current = s.access_token;
+    if (inflightSession.current) return inflightSession.current;
+
+    const p = (async () => {
+      await api.post('/auth/session');
+      sessionedToken.current = s.access_token; // only on success
+    })();
+    inflightSession.current = p;
+    try {
+      await p;
+    } finally {
+      inflightSession.current = null;
+    }
   }, []);
 
   const signIn = useCallback(
@@ -189,17 +204,24 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         const r = roleFromMetadata(data.session.user.app_metadata);
         const ready = !MFA_ROLES.includes(r) || aalFromSession(data.session) === 'aal2';
         if (ready) {
+          // Apply the session only AFTER the backend session is ready, so the
+          // dashboard doesn't mount and fire API calls before Redis has the
+          // entry. If it fails, drop the session rather than land on a
+          // dashboard that 401s.
           try {
             await ensureBackendSession(data.session);
+            applySession(data.session);
           } catch {
-            /* surfaced via the api interceptor toast */
+            await supabase.auth.signOut();
+            applySession(null);
           }
+        } else {
+          // Needs MFA first — keep the session so RequireAuth routes to /login.
+          applySession(data.session);
         }
+      } else {
+        applySession(null);
       }
-      // Apply the session AFTER the backend session is ready so the
-      // dashboard doesn't mount and fire API calls before Redis has
-      // the session entry.
-      applySession(data.session);
       setLoading(false);
     })();
 
@@ -220,11 +242,17 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       if (!needsMfa || hasAal2) {
         try {
           await ensureBackendSession(s);
+          applySession(s);
         } catch {
-          /* surfaced via the api interceptor toast */
+          // Backend session couldn't be opened — don't leave the user on a
+          // dashboard that will 401. Sign out cleanly.
+          await supabase.auth.signOut();
+          applySession(null);
         }
+      } else {
+        // Needs MFA first — render the verify/enrol screen.
+        applySession(s);
       }
-      applySession(s);
     });
 
     return () => {

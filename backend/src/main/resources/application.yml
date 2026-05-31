@@ -2,10 +2,15 @@ spring:
   application:
     name: emergencyconnectuae-backend
   datasource:
-    url: ${DB_URL:jdbc:postgresql://db.jdevzqbzbxnhqnynrmgg.supabase.co:5432/postgres}
-    password: ${DB_PASSWORD:EmergencyConnectUAE}
+    # connectTimeout/socketTimeout raised from the pg default (10s) because the
+    # Supabase direct host is IPv6-only in ap-south-1 and the path can be slow.
+    url: ${DB_URL:jdbc:postgresql://db.jdevzqbzbxnhqnynrmgg.supabase.co:5432/postgres?connectTimeout=30&socketTimeout=60&tcpKeepAlive=true}
+    password: ${DB_PASSWORD:EmergencyConnectUae}
     username: ${DB_USERNAME:postgres}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      connection-timeout: 30000
+      initialization-fail-timeout: -1   # don't crash startup if DB is briefly unreachable
   jpa:
     hibernate:
       ddl-auto: none
@@ -22,6 +27,8 @@ spring:
     oauth2:
       resourceserver:
         jwt:
+          # Accepted signing algorithms (ES256 for Supabase) are configured on
+          # the JwtDecoder bean in SecurityConfig, which overrides this section.
           jwk-set-uri: ${SUPABASE_JWKS_URI:https://jdevzqbzbxnhqnynrmgg.supabase.co/auth/v1/.well-known/jwks.json}
 
 redisson:
