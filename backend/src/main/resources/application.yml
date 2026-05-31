@@ -1,0 +1,35 @@
+spring:
+  application:
+    name: emergencyconnectuae-backend
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/postgres}
+    password: ${DB_PASSWORD:postgres}
+    username: postgres
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+    properties:
+      hibernate:
+        # Hibernate 6 (Spring Boot 3.2): spatial support is enabled automatically
+        # by hibernate-spatial on the classpath; the standard PostgreSQL dialect
+        # maps GEOGRAPHY(POINT,4326) <-> org.locationtech.jts.geom.Point.
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+    show-sql: true
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${SUPABASE_JWKS_URI:http://localhost:8000/auth/v1/.well-known/jwks.json}
+
+redisson:
+  address: ${REDIS_ADDRESS:redis://127.0.0.1:6379}
+  password: ${REDIS_PASSWORD:}
+
+cors:
+  allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
+
+server:
+  port: 8080
