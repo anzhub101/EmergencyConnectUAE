@@ -91,12 +91,13 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     async (email: string, password: string) => {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) throw error;
-      applySession(data.session);
-      // Roles without an MFA requirement are ready immediately.
+      // Roles without an MFA requirement are ready immediately: open the
+      // backend session before flipping into the signed-in state.
       const r = data.session ? roleFromMetadata(data.session.user.app_metadata) : null;
       if (r && !MFA_ROLES.includes(r)) {
         await ensureBackendSession(data.session);
       }
+      applySession(data.session);
     },
     [applySession, ensureBackendSession],
   );
@@ -151,9 +152,16 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       if (verify.error) throw verify.error;
 
       pendingFactorId.current = null;
-      // verify() returns the upgraded (aal2) session; use it directly.
-      applySession(verify.data);
-      await ensureBackendSession(verify.data);
+      // Fetch the actual updated session carrying the upgraded (aal2) token.
+      const { data: { session: updatedSession } } = await supabase.auth.getSession();
+      if (!updatedSession) throw new Error('MFA verification succeeded but no session was found.');
+
+      // Open the backend session FIRST. Only mark ourselves "signed in"
+      // (applySession -> mfaSatisfied) once it succeeds, so a failed session
+      // call surfaces as an error on the login screen instead of dropping the
+      // user onto a dashboard that 401s.
+      await ensureBackendSession(updatedSession);
+      applySession(updatedSession);
     },
     [applySession, ensureBackendSession],
   );
@@ -177,7 +185,6 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     (async () => {
       const { data } = await supabase.auth.getSession();
       if (!active) return;
-      applySession(data.session);
       if (data.session) {
         const r = roleFromMetadata(data.session.user.app_metadata);
         const ready = !MFA_ROLES.includes(r) || aalFromSession(data.session) === 'aal2';
@@ -189,12 +196,35 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           }
         }
       }
+      // Apply the session AFTER the backend session is ready so the
+      // dashboard doesn't mount and fire API calls before Redis has
+      // the session entry.
+      applySession(data.session);
       setLoading(false);
     })();
 
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
+    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, s) => {
+      if (!s) {
+        sessionedToken.current = null;
+        applySession(null);
+        return;
+      }
+      // For sessions that are ready (non-MFA roles, or MFA roles with
+      // aal2), ensure the backend Redis session exists BEFORE flipping
+      // the UI into the signed-in state.  The guard inside
+      // ensureBackendSession (sessionedToken.current check) prevents
+      // double-POSTing if verifyMfa already opened the session.
+      const r = roleFromMetadata(s.user.app_metadata);
+      const needsMfa = MFA_ROLES.includes(r);
+      const hasAal2 = aalFromSession(s) === 'aal2';
+      if (!needsMfa || hasAal2) {
+        try {
+          await ensureBackendSession(s);
+        } catch {
+          /* surfaced via the api interceptor toast */
+        }
+      }
       applySession(s);
-      if (!s) sessionedToken.current = null;
     });
 
     return () => {

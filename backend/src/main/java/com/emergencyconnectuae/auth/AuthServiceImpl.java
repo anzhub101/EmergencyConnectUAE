@@ -35,18 +35,28 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     public SessionResponse createSession(Jwt jwt, String ipAddress) {
-        String jti = jwt.getId();
+        String sessionKey = sessionKey(jwt);
         UUID userId = UUID.fromString(jwt.getSubject());
-        
+
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResourceNotFoundException("User", "id", userId));
 
         RMapCache<String, Object> sessionCache = redissonClient.getMapCache("session");
 
-        long expirySeconds = jwt.getExpiresAt() != null ? 
-                             jwt.getExpiresAt().getEpochSecond() - Instant.now().getEpochSecond() : 3600;
+        long expirySeconds = 3600;
+        if (jwt.getExpiresAt() != null) {
+            if (jwt.getIssuedAt() != null) {
+                // Compute absolute token lifetime to remain immune to clock skew
+                expirySeconds = jwt.getExpiresAt().getEpochSecond() - jwt.getIssuedAt().getEpochSecond();
+            } else {
+                expirySeconds = jwt.getExpiresAt().getEpochSecond() - Instant.now().getEpochSecond();
+            }
+        }
         
-        if (expirySeconds <= 0) expirySeconds = 1;
+        // Enforce a safe minimum TTL of 1 hour to prevent tiny TTLs due to system clock mismatches
+        if (expirySeconds < 3600) {
+            expirySeconds = 3600;
+        }
 
         Map<String, Object> sessionData = new HashMap<>();
         sessionData.put("userId", userId);
@@ -54,7 +64,7 @@ public class AuthServiceImpl implements AuthService {
         sessionData.put("ipAddress", ipAddress);
         sessionData.put("expiresAt", jwt.getExpiresAt() != null ? jwt.getExpiresAt().toEpochMilli() : 0);
 
-        sessionCache.put(jti, sessionData, expirySeconds, TimeUnit.SECONDS);
+        sessionCache.put(sessionKey, sessionData, expirySeconds, TimeUnit.SECONDS);
 
         auditLogger.log("SESSION_CREATED", "SESSION", userId, "SUCCESS");
 
@@ -62,9 +72,17 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
-    public void deleteSession(String jti) {
+    public void deleteSession(Jwt jwt) {
         RMapCache<String, Object> sessionCache = redissonClient.getMapCache("session");
-        sessionCache.remove(jti);
+        sessionCache.remove(sessionKey(jwt));
         auditLogger.log("SESSION_DELETED", "SESSION", null, "SUCCESS");
+    }
+
+    // Supabase access tokens carry a stable `session_id` claim (constant across
+    // token refreshes) but no `jti`. We key the Redis session by `session_id`,
+    // falling back to the subject so a token without it still resolves.
+    static String sessionKey(Jwt jwt) {
+        String sid = jwt.getClaimAsString("session_id");
+        return sid != null ? sid : jwt.getSubject();
     }
 }

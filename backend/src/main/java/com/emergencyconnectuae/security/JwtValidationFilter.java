@@ -59,7 +59,11 @@ public class JwtValidationFilter extends OncePerRequestFilter {
 
         if (authentication instanceof JwtAuthenticationToken jwtAuth) {
             Jwt jwt = jwtAuth.getToken();
-            String jti = jwt.getId();
+            // Supabase tokens have no `jti`; key the session by the stable
+            // `session_id` claim (falling back to the subject), matching
+            // AuthServiceImpl#sessionKey.
+            String sid = jwt.getClaimAsString("session_id");
+            String sessionKey = sid != null ? sid : jwt.getSubject();
             String ip = request.getRemoteAddr();
 
             boolean isCreatingSession = "POST".equalsIgnoreCase(request.getMethod())
@@ -76,7 +80,7 @@ public class JwtValidationFilter extends OncePerRequestFilter {
 
             if (!isCreatingSession) {
                 RMapCache<String, Map<String, Object>> sessionCache = redissonClient.getMapCache(SESSION_MAP);
-                Map<String, Object> sessionData = sessionCache.get(jti);
+                Map<String, Object> sessionData = sessionCache.get(sessionKey);
 
                 if (sessionData == null) {
                     ipBlacklist.recordDenial(ip);

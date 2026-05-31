@@ -11,5 +11,5 @@ import org.springframework.security.oauth2.jwt.Jwt;
 
 public interface AuthService {
     SessionResponse createSession(Jwt jwt, String ipAddress);
-    void deleteSession(String jti);
+    void deleteSession(Jwt jwt);
 }

@@ -242,7 +242,7 @@ Legend:
 ## 11. Reports and Deliverables
 
 - `[x]` Full Java project final build with Java 21. (`./mvnw clean package` -> BUILD SUCCESS, bytecode v65)
-- `[ ]` TypeScript frontend using real Supabase Auth and backend APIs.
+- `[x]` TypeScript frontend using real Supabase Auth and backend APIs.
 - `[ ]` Demo video.
 - `[ ]` System architecture + DB ERD report.
 - `[ ]` Redis key inventory and analytical Redis section.

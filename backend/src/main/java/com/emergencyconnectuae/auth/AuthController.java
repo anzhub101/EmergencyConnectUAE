@@ -35,7 +35,7 @@ public class AuthController {
     @DeleteMapping("/session")
     @Operation(summary = "Revoke the current session (logout); the JWT is rejected afterwards")
     public ResponseEntity<Void> deleteSession(@AuthenticationPrincipal Jwt jwt) {
-        authService.deleteSession(jwt.getId());
+        authService.deleteSession(jwt);
         return ResponseEntity.noContent().build();
     }
 }
