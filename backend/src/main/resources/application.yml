@@ -2,8 +2,8 @@ spring:
   application:
     name: emergencyconnectuae-backend
   datasource:
-    url: ${DB_URL:jdbc:postgresql://localhost:5432/postgres}
-    password: ${DB_PASSWORD:postgres}
+    url: ${DB_URL:jdbc:postgresql://db.jdevzqbzbxnhqnynrmgg.supabase.co:5432/postgres}
+    password: ${DB_PASSWORD:<EmergencyConnectUAE>}
     username: postgres
     driver-class-name: org.postgresql.Driver
   jpa:
@@ -22,7 +22,7 @@ spring:
     oauth2:
       resourceserver:
         jwt:
-          jwk-set-uri: ${SUPABASE_JWKS_URI:http://localhost:8000/auth/v1/.well-known/jwks.json}
+          jwk-set-uri: ${SUPABASE_JWKS_URI:https://jdevzqbzbxnhqnynrmgg.supabase.co/auth/v1/.well-known/jwks.json}
 
 redisson:
   address: ${REDIS_ADDRESS:redis://127.0.0.1:6379}
