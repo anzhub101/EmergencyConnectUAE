@@ -10,6 +10,7 @@ import com.emergencyconnectuae.audit.dto.AuditLogResponse;
 import com.emergencyconnectuae.common.PagedResponse;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.stereotype.Service;
 
 import java.util.UUID;
@@ -18,6 +19,7 @@ import java.util.UUID;
  * Audit logs are never cached (SRS 5.4) — always read directly from Supabase.
  */
 @Service
+@Transactional(readOnly = true)
 public class AuditServiceImpl implements AuditService {
 
     private final AuditLogRepository auditLogRepository;

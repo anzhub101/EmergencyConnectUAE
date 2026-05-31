@@ -2,14 +2,23 @@ spring:
   application:
     name: emergencyconnectuae-backend
   datasource:
-    # connectTimeout/socketTimeout raised from the pg default (10s) because the
-    # Supabase direct host is IPv6-only in ap-south-1 and the path can be slow.
-    url: ${DB_URL:jdbc:postgresql://db.jdevzqbzbxnhqnynrmgg.supabase.co:5432/postgres?connectTimeout=30&socketTimeout=60&tcpKeepAlive=true}
+    # Supabase Session pooler (IPv4-reachable). The direct host is IPv6-only and
+    # connects intermittently; the pooler is stable. NOTE: the pooler requires
+    # the username form `postgres.<project-ref>`, not plain `postgres`.
+    url: ${DB_URL:jdbc:postgresql://aws-1-ap-south-1.pooler.supabase.com:5432/postgres?connectTimeout=30&socketTimeout=60&tcpKeepAlive=true}
     password: ${DB_PASSWORD:EmergencyConnectUae}
-    username: ${DB_USERNAME:postgres}
+    username: ${DB_USERNAME:postgres.jdevzqbzbxnhqnynrmgg}
     driver-class-name: org.postgresql.Driver
     hikari:
+      # Tuned for the Supabase pooler (free tier has a small connection budget,
+      # and the pooler closes idle server connections).
+      maximum-pool-size: 5              # keep well under the pooler's limit
+      minimum-idle: 1
       connection-timeout: 30000
+      max-lifetime: 120000              # recycle before the pooler drops idle conns
+      keepalive-time: 30000             # probe idle conns to keep them alive
+      idle-timeout: 60000
+      connection-test-query: SELECT 1   # validate borrowed conns (pooler-safe)
       initialization-fail-timeout: -1   # don't crash startup if DB is briefly unreachable
   jpa:
     hibernate:

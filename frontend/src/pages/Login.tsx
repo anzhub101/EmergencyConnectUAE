@@ -7,7 +7,7 @@ import { Loader2, ShieldCheck, QrCode } from 'lucide-react';
 type Stage = 'credentials' | 'verify' | 'enroll';
 
 export const Login = () => {
-  const { session, mfaSatisfied, signIn, prepareMfa, verifyMfa } = useAuth();
+  const { session, mfaSatisfied, authed, signIn, prepareMfa, verifyMfa, signOut } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const from = (location.state as { from?: string } | null)?.from ?? '/';
@@ -21,14 +21,27 @@ export const Login = () => {
   // Guards prepareMfa() from running twice (React 18 StrictMode / re-renders).
   const preparing = useRef(false);
 
-  // Once signed in, either proceed or branch into the TOTP step.
+  // When there's no session (fresh load, or after Cancel & Sign Out), reset to a
+  // clean credentials form. Crucially this clears `preparing` so the next login
+  // — possibly a different account — can run prepareMfa again.
   useEffect(() => {
-    if (!session) return;
-    if (mfaSatisfied) {
-      navigate(from, { replace: true });
-      return;
+    if (!session) {
+      preparing.current = false;
+      setStage('credentials');
+      setEnroll(null);
+      setCode('');
     }
-    if (preparing.current) return;
+  }, [session]);
+
+  // Fully signed in (incl. backend session) — leave the login page.
+  useEffect(() => {
+    if (authed) navigate(from, { replace: true });
+  }, [authed, navigate, from]);
+
+  // Signed in to Supabase but the role still owes its TOTP step — branch into
+  // verify (existing authenticator) or enrol (scan a new QR code).
+  useEffect(() => {
+    if (!session || mfaSatisfied || preparing.current) return;
     preparing.current = true;
     (async () => {
       try {
@@ -44,7 +57,7 @@ export const Login = () => {
         preparing.current = false;
       }
     })();
-  }, [session, mfaSatisfied, prepareMfa, navigate, from]);
+  }, [session, mfaSatisfied, prepareMfa]);
 
   const submitCredentials = async (e: FormEvent) => {
     e.preventDefault();
@@ -147,6 +160,18 @@ export const Login = () => {
             </div>
             <CodeInput code={code} setCode={setCode} inputClass={inputClass} />
             <SubmitCode busy={busy} code={code} label="Verify & Enable" />
+            <button
+              type="button"
+              onClick={async () => {
+                await signOut();
+                setStage('credentials');
+                setEnroll(null);
+                setCode('');
+              }}
+              className="w-full text-center text-sm text-muted-foreground hover:text-foreground mt-2 font-medium transition-colors"
+            >
+              Cancel & Sign Out
+            </button>
           </form>
         )}
 
@@ -161,6 +186,18 @@ export const Login = () => {
             </p>
             <CodeInput code={code} setCode={setCode} inputClass={inputClass} />
             <SubmitCode busy={busy} code={code} label="Verify" />
+            <button
+              type="button"
+              onClick={async () => {
+                await signOut();
+                setStage('credentials');
+                setEnroll(null);
+                setCode('');
+              }}
+              className="w-full text-center text-sm text-muted-foreground hover:text-foreground mt-2 font-medium transition-colors"
+            >
+              Cancel & Sign Out
+            </button>
           </form>
         )}
       </div>

@@ -1,15 +1,17 @@
 // Authentication state for the whole app.
 //
 // Flow (SRS 8.5):
-//   1. Email + password sign-in via Supabase Auth.
-//   2. Dispatcher / System Admin must reach assurance level aal2 via TOTP:
-//        - if a verified authenticator factor exists  -> challenge + verify a code
-//        - if none exists yet                         -> self-service enrolment
-//          (scan a QR code into an authenticator app, then verify a code)
-//      Verifying upgrades the access token so it carries `amr: totp` / aal2.
-//   3. Once the token is at the required assurance level we POST it to
-//      /api/v1/auth/session so the backend opens the matching Redis session.
-//      Without that session every other backend call returns 401.
+//   1. Email + password via Supabase Auth.
+//   2. Dispatcher / System Admin must reach assurance level aal2 via TOTP —
+//      verify an existing authenticator, or enrol one by scanning a QR code.
+//   3. Once the token is at the required assurance level, POST /api/v1/auth/session
+//      opens the backend Redis session. Only then is the user "authed"; every
+//      other backend call needs that session or returns 401.
+//
+// Design: we mirror Supabase's session into state via onAuthStateChange, and a
+// single effect opens the backend session when the token becomes usable. The
+// UI only treats the user as signed in once that backend session exists, which
+// keeps the dashboard from rendering (and 401-ing) too early.
 import {
   createContext,
   useCallback,
@@ -35,10 +37,11 @@ interface AuthState {
   session: Session | null;
   role: AppRole | null;
   loading: boolean;
-  /** True once the user has met the assurance level their role requires. */
+  /** Token meets the assurance level the role requires (aal2 for MFA roles). */
   mfaSatisfied: boolean;
+  /** Fully signed in: MFA satisfied AND the backend Redis session is open. */
+  authed: boolean;
   signIn: (email: string, password: string) => Promise<void>;
-  /** Decide whether the user must verify an existing factor or enrol a new one. */
   prepareMfa: () => Promise<MfaStep>;
   verifyMfa: (code: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -47,12 +50,11 @@ interface AuthState {
 const AuthContext = createContext<AuthState | undefined>(undefined);
 
 // Read the `aal` claim straight out of the JWT (no extra network call).
-const aalFromSession = (s: Session | null): string | null => {
+const aalOf = (s: Session | null): string | null => {
   if (!s?.access_token) return null;
   try {
     const payload = s.access_token.split('.')[1];
-    const json = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
-    return typeof json.aal === 'string' ? json.aal : null;
+    return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/'))).aal ?? null;
   } catch {
     return null;
   }
@@ -60,66 +62,50 @@ const aalFromSession = (s: Session | null): string | null => {
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [session, setSession] = useState<Session | null>(null);
-  const [role, setRole] = useState<AppRole | null>(null);
-  const [aal, setAal] = useState<string | null>(null);
+  const [backendReady, setBackendReady] = useState(false);
   const [loading, setLoading] = useState(true);
-  // Factor id captured while we wait for the user to enter a TOTP code.
   const pendingFactorId = useRef<string | null>(null);
-  // Access token for which the backend session has already been opened.
-  const sessionedToken = useRef<string | null>(null);
-  // In-flight POST /auth/session, so concurrent callers (signIn / verifyMfa /
-  // onAuthStateChange) share a single request and all observe its real outcome.
-  const inflightSession = useRef<Promise<void> | null>(null);
 
+  const role = useMemo(() => (session ? roleFromMetadata(session.user.app_metadata) : null), [session]);
   const mfaSatisfied = useMemo(() => {
     if (!session || !role) return false;
-    return MFA_ROLES.includes(role) ? aal === 'aal2' : true;
-  }, [session, role, aal]);
+    return MFA_ROLES.includes(role) ? aalOf(session) === 'aal2' : true;
+  }, [session, role]);
+  const authed = !!session && mfaSatisfied && backendReady;
 
-  const applySession = useCallback((s: Session | null) => {
-    setSession(s);
-    setRole(s ? roleFromMetadata(s.user.app_metadata) : null);
-    setAal(aalFromSession(s));
+  // Mirror Supabase auth state into React (initial load + refresh + sign-out).
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setLoading(false);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
+      setSession(s);
+      if (!s) setBackendReady(false);
+    });
+    return () => sub.subscription.unsubscribe();
   }, []);
 
-  // Open (or refresh) the backend Redis session for the current access token.
-  // Throws if the backend call fails — callers must NOT mark the user signed in
-  // unless this resolves. Concurrent callers de-duplicate onto one request.
-  const ensureBackendSession = useCallback(async (s: Session | null) => {
-    if (!s) return;
-    if (sessionedToken.current === s.access_token) return;
-    if (inflightSession.current) return inflightSession.current;
+  // The single place that opens the backend session — runs once the token is
+  // usable (non-MFA role, or MFA role at aal2) and the session isn't open yet.
+  useEffect(() => {
+    if (!session || !mfaSatisfied || backendReady) return;
+    let cancelled = false;
+    api.post('/auth/session')
+      .then(() => { if (!cancelled) setBackendReady(true); })
+      .catch(() => { /* surfaced via the api interceptor toast; stay un-authed */ });
+    return () => { cancelled = true; };
+  }, [session?.access_token, mfaSatisfied, backendReady]);
 
-    const p = (async () => {
-      await api.post('/auth/session');
-      sessionedToken.current = s.access_token; // only on success
-    })();
-    inflightSession.current = p;
-    try {
-      await p;
-    } finally {
-      inflightSession.current = null;
-    }
+  const signIn = useCallback(async (email: string, password: string) => {
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    // onAuthStateChange updates `session`; the effect above opens the backend
+    // session; the Login page drives the TOTP step if the role needs it.
   }, []);
 
-  const signIn = useCallback(
-    async (email: string, password: string) => {
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) throw error;
-      // Roles without an MFA requirement are ready immediately: open the
-      // backend session before flipping into the signed-in state.
-      const r = data.session ? roleFromMetadata(data.session.user.app_metadata) : null;
-      if (r && !MFA_ROLES.includes(r)) {
-        await ensureBackendSession(data.session);
-      }
-      applySession(data.session);
-    },
-    [applySession, ensureBackendSession],
-  );
-
-  // Called when the role needs aal2 but the session isn't there yet. Returns
-  // whether to verify an existing factor or run first-time enrolment, and
-  // stashes the factor id for verifyMfa().
+  // Decide whether to verify an existing authenticator or enrol a new one, and
+  // stash the factor id for verifyMfa().
   const prepareMfa = useCallback(async (): Promise<MfaStep> => {
     const { data: factors, error } = await supabase.auth.mfa.listFactors();
     if (error) throw error;
@@ -131,8 +117,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     }
 
     // Clear any half-finished factor so enrol() returns a fresh QR/secret.
-    const stale = factors.all.filter((f) => f.factor_type === 'totp' && f.status !== 'verified');
-    for (const f of stale) {
+    for (const f of factors.all.filter((f) => f.factor_type === 'totp' && f.status !== 'verified')) {
       await supabase.auth.mfa.unenroll({ factorId: f.id });
     }
 
@@ -143,127 +128,41 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     if (enrollErr) throw enrollErr;
 
     pendingFactorId.current = enrolled.id;
-    return {
-      mode: 'enroll',
-      qrCode: enrolled.totp.qr_code,
-      secret: enrolled.totp.secret,
-      uri: enrolled.totp.uri,
-    };
+    return { mode: 'enroll', qrCode: enrolled.totp.qr_code, secret: enrolled.totp.secret, uri: enrolled.totp.uri };
   }, []);
 
-  const verifyMfa = useCallback(
-    async (code: string) => {
-      const factorId = pendingFactorId.current;
-      if (!factorId) throw new Error('No MFA challenge in progress.');
+  const verifyMfa = useCallback(async (code: string) => {
+    const factorId = pendingFactorId.current;
+    if (!factorId) throw new Error('No MFA challenge in progress.');
 
-      const challenge = await supabase.auth.mfa.challenge({ factorId });
-      if (challenge.error) throw challenge.error;
+    const challenge = await supabase.auth.mfa.challenge({ factorId });
+    if (challenge.error) throw challenge.error;
 
-      const verify = await supabase.auth.mfa.verify({
-        factorId,
-        challengeId: challenge.data.id,
-        code,
-      });
-      if (verify.error) throw verify.error;
+    const verify = await supabase.auth.mfa.verify({ factorId, challengeId: challenge.data.id, code });
+    if (verify.error) throw verify.error;
 
-      pendingFactorId.current = null;
-      // Fetch the actual updated session carrying the upgraded (aal2) token.
-      const { data: { session: updatedSession } } = await supabase.auth.getSession();
-      if (!updatedSession) throw new Error('MFA verification succeeded but no session was found.');
-
-      // Open the backend session FIRST. Only mark ourselves "signed in"
-      // (applySession -> mfaSatisfied) once it succeeds, so a failed session
-      // call surfaces as an error on the login screen instead of dropping the
-      // user onto a dashboard that 401s.
-      await ensureBackendSession(updatedSession);
-      applySession(updatedSession);
-    },
-    [applySession, ensureBackendSession],
-  );
+    pendingFactorId.current = null;
+    // Pull the upgraded (aal2) session; the effect above then opens the backend
+    // session and `authed` flips true.
+    const { data } = await supabase.auth.getSession();
+    setSession(data.session);
+  }, []);
 
   const signOut = useCallback(async () => {
     try {
       await api.delete('/auth/session');
     } catch {
-      // Best effort — log out locally even if the server call fails.
+      /* best effort — log out locally even if the server call fails */
     }
     await supabase.auth.signOut();
-    sessionedToken.current = null;
     pendingFactorId.current = null;
-    applySession(null);
-  }, [applySession]);
-
-  // Restore an existing session on load and react to token refreshes.
-  useEffect(() => {
-    let active = true;
-
-    (async () => {
-      const { data } = await supabase.auth.getSession();
-      if (!active) return;
-      if (data.session) {
-        const r = roleFromMetadata(data.session.user.app_metadata);
-        const ready = !MFA_ROLES.includes(r) || aalFromSession(data.session) === 'aal2';
-        if (ready) {
-          // Apply the session only AFTER the backend session is ready, so the
-          // dashboard doesn't mount and fire API calls before Redis has the
-          // entry. If it fails, drop the session rather than land on a
-          // dashboard that 401s.
-          try {
-            await ensureBackendSession(data.session);
-            applySession(data.session);
-          } catch {
-            await supabase.auth.signOut();
-            applySession(null);
-          }
-        } else {
-          // Needs MFA first — keep the session so RequireAuth routes to /login.
-          applySession(data.session);
-        }
-      } else {
-        applySession(null);
-      }
-      setLoading(false);
-    })();
-
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, s) => {
-      if (!s) {
-        sessionedToken.current = null;
-        applySession(null);
-        return;
-      }
-      // For sessions that are ready (non-MFA roles, or MFA roles with
-      // aal2), ensure the backend Redis session exists BEFORE flipping
-      // the UI into the signed-in state.  The guard inside
-      // ensureBackendSession (sessionedToken.current check) prevents
-      // double-POSTing if verifyMfa already opened the session.
-      const r = roleFromMetadata(s.user.app_metadata);
-      const needsMfa = MFA_ROLES.includes(r);
-      const hasAal2 = aalFromSession(s) === 'aal2';
-      if (!needsMfa || hasAal2) {
-        try {
-          await ensureBackendSession(s);
-          applySession(s);
-        } catch {
-          // Backend session couldn't be opened — don't leave the user on a
-          // dashboard that will 401. Sign out cleanly.
-          await supabase.auth.signOut();
-          applySession(null);
-        }
-      } else {
-        // Needs MFA first — render the verify/enrol screen.
-        applySession(s);
-      }
-    });
-
-    return () => {
-      active = false;
-      sub.subscription.unsubscribe();
-    };
-  }, [applySession, ensureBackendSession]);
+    setSession(null);
+    setBackendReady(false);
+  }, []);
 
   const value = useMemo<AuthState>(
-    () => ({ session, role, loading, mfaSatisfied, signIn, prepareMfa, verifyMfa, signOut }),
-    [session, role, loading, mfaSatisfied, signIn, prepareMfa, verifyMfa, signOut],
+    () => ({ session, role, loading, mfaSatisfied, authed, signIn, prepareMfa, verifyMfa, signOut }),
+    [session, role, loading, mfaSatisfied, authed, signIn, prepareMfa, verifyMfa, signOut],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

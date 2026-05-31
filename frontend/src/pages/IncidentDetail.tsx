@@ -24,7 +24,8 @@ export const IncidentDetail = () => {
     if (data.latitude != null && data.longitude != null) {
       try {
         const { data: nearby } = await api.get<ProximityUnit[]>(
-          `/resources/proximity?lat=${data.latitude}&lng=${data.longitude}&radius=50000&type=ALL`);
+          `/resources/proximity?lat=${data.latitude}&lng=${data.longitude}&radius=50000&type=ALL`,
+          { skipErrorToast: true });
         setUnits(nearby);
       } catch { /* proximity is best-effort */ }
     }
@@ -75,7 +76,7 @@ export const IncidentDetail = () => {
     <div className="flex h-screen bg-background">
       <Sidebar />
       <main className="flex-1 overflow-auto p-8">
-        <button onClick={() => navigate('/dashboard')} className="flex items-center gap-2 text-muted-foreground hover:text-foreground mb-6">
+        <button onClick={() => navigate('/')} className="flex items-center gap-2 text-muted-foreground hover:text-foreground mb-6">
           <ArrowLeft size={18} /> Back to dashboard
         </button>
 

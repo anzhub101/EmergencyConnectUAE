@@ -27,13 +27,13 @@ public interface EmergencyUnitRepository extends JpaRepository<EmergencyUnit, UU
                    u.status        AS status,
                    u.home_station  AS home_station,
                    ST_Distance(u.location,
-                       ST_MakePoint(:lng, :lat)::geography) AS distance_m
+                       CAST(ST_MakePoint(:lng, :lat) AS geography)) AS distance_m
             FROM emergency_units u
             WHERE u.is_deleted = false
               AND u.status = 'AVAILABLE'
               AND u.location IS NOT NULL
               AND ST_DWithin(u.location,
-                      ST_MakePoint(:lng, :lat)::geography, :radius)
+                      CAST(ST_MakePoint(:lng, :lat) AS geography), :radius)
               AND (:type = 'ALL' OR u.type = :type)
             ORDER BY distance_m ASC
             LIMIT 10

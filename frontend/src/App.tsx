@@ -9,22 +9,25 @@ import { IncidentDetail } from './pages/IncidentDetail'
 
 // Gate that redirects unauthenticated users to /login, remembering where they
 // were headed so we can return them after sign-in.
+const Spinner = () => (
+  <div className="flex min-h-screen items-center justify-center bg-background text-muted-foreground">
+    Loading…
+  </div>
+)
+
 const RequireAuth = ({ children }: { children: ReactNode }) => {
-  const { session, mfaSatisfied, loading } = useAuth()
+  const { session, mfaSatisfied, authed, loading } = useAuth()
   const location = useLocation()
 
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-background text-muted-foreground">
-        Loading…
-      </div>
-    )
-  }
+  if (loading) return <Spinner />
   // No session, or a role that still owes its two-factor step — send to /login,
   // which resumes the verify/enrol flow.
   if (!session || !mfaSatisfied) {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />
   }
+  // MFA is satisfied but the backend session is still opening — wait rather
+  // than flashing the login screen.
+  if (!authed) return <Spinner />
   return <>{children}</>
 }
 

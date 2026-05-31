@@ -5,6 +5,14 @@ import axios, { AxiosError } from 'axios';
 import { supabase } from './supabase';
 import { toast } from './toast';
 
+// Set `{ skipErrorToast: true }` on a request config to suppress the automatic
+// error toast (for best-effort calls the caller handles itself).
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    skipErrorToast?: boolean;
+  }
+}
+
 const api = axios.create({
   baseURL: '/api/v1',
   headers: { 'Content-Type': 'application/json' },
@@ -24,6 +32,10 @@ api.interceptors.response.use(
   (error: AxiosError<{ message?: string; error?: string }>) => {
     const status = error.response?.status;
     const serverMsg = error.response?.data?.message || error.response?.data?.error;
+
+    if (error.config?.skipErrorToast) {
+      return Promise.reject(error);
+    }
 
     if (status === 401) {
       toast('Session expired or revoked — please sign in again.', 'error');
