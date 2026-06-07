@@ -31,7 +31,6 @@ echo "incident=$INC  unit=$UNIT"
 
 BODY="{\"incidentId\":\"$INC\",\"unitId\":\"$UNIT\"}"
 
-# fire TWO assignments for the SAME unit, truly in parallel
 curl -s -o /tmp/a1.txt -w "req1: %{http_code}\n" -X POST "$BASE/assignments" -H "$AUTH" -H "Content-Type: application/json" -d "$BODY" &
 curl -s -o /tmp/a2.txt -w "req2: %{http_code}\n" -X POST "$BASE/assignments" -H "$AUTH" -H "Content-Type: application/json" -d "$BODY" &
 wait
@@ -39,7 +38,6 @@ wait
 echo "req1 body: $(cat /tmp/a1.txt)"
 echo "req2 body: $(cat /tmp/a2.txt)"
 
-# reset so the demo can be repeated: release the winning assignment (unit -> AVAILABLE)
 AID=$(python3 -c "import json;
 import sys
 for f in ('/tmp/a1.txt','/tmp/a2.txt'):

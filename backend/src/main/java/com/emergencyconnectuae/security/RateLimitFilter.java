@@ -47,12 +47,12 @@ public class RateLimitFilter extends OncePerRequestFilter {
         String ip = request.getRemoteAddr();
 
         if (hasTraversal(request.getRequestURI()) || hasTraversal(request.getQueryString())) {
-            response.sendError(HttpServletResponse.SC_BAD_REQUEST, "Illegal path");
+            writeError(response, HttpServletResponse.SC_BAD_REQUEST, "BAD_REQUEST", "Illegal path");
             return;
         }
 
         if (ipBlacklist.isBlacklisted(ip)) {
-            response.sendError(HttpServletResponse.SC_FORBIDDEN, "IP blacklisted");
+            writeError(response, HttpServletResponse.SC_FORBIDDEN, "FORBIDDEN", "IP blacklisted");
             return;
         }
 
@@ -62,12 +62,27 @@ public class RateLimitFilter extends OncePerRequestFilter {
             loginLimiter.trySetRate(RateType.OVERALL, 5, 1, RateIntervalUnit.MINUTES);
             if (!loginLimiter.tryAcquire()) {
                 response.setHeader("Retry-After", "60");
-                response.sendError(429, "Too Many Requests");
+                writeError(response, 429, "TOO_MANY_REQUESTS", "Rate limit exceeded");
                 return;
             }
         }
 
         filterChain.doFilter(request, response);
+    }
+
+    /**
+     * Writes the error response directly rather than via {@link HttpServletResponse#sendError},
+     * which triggers a servlet ERROR dispatch back through the security chain — for an
+     * unauthenticated request that re-dispatch overwrote our status (e.g. 429/403/400)
+     * with the 401 from the authentication entry point. Writing directly preserves the
+     * intended status and returns a JSON body consistent with GlobalExceptionHandler.
+     */
+    private void writeError(HttpServletResponse response, int status, String error, String message) throws IOException {
+        response.setStatus(status);
+        response.setContentType("application/json");
+        response.setCharacterEncoding("UTF-8");
+        response.getWriter().write(String.format("{\"error\":\"%s\",\"message\":\"%s\"}", error, message));
+        response.getWriter().flush();
     }
 
     private boolean hasTraversal(String value) {

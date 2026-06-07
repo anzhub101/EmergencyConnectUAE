@@ -22,6 +22,7 @@ import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Caching;
 import org.springframework.stereotype.Service;
@@ -47,25 +48,32 @@ public class AssignmentServiceImpl implements AssignmentService {
     private final UserRepository userRepository;
     private final RedissonClient redissonClient;
     private final AuditLogger auditLogger;
+    // Self-reference (the proxied bean) so the @Transactional body is invoked
+    // through Spring's proxy. ObjectProvider defers resolution and avoids a
+    // self-referential construction cycle.
+    private final ObjectProvider<AssignmentServiceImpl> self;
 
     public AssignmentServiceImpl(AssignmentRepository assignmentRepository, IncidentRepository incidentRepository,
                                  EmergencyUnitRepository unitRepository, UserRepository userRepository,
-                                 RedissonClient redissonClient, AuditLogger auditLogger) {
+                                 RedissonClient redissonClient, AuditLogger auditLogger,
+                                 ObjectProvider<AssignmentServiceImpl> self) {
         this.assignmentRepository = assignmentRepository;
         this.incidentRepository = incidentRepository;
         this.unitRepository = unitRepository;
         this.userRepository = userRepository;
         this.redissonClient = redissonClient;
         this.auditLogger = auditLogger;
+        this.self = self;
     }
 
     @Override
-    @Transactional
-    @Caching(evict = {
-            @CacheEvict(value = "resourcesAvail", allEntries = true),
-            @CacheEvict(value = "dashboard:summary", allEntries = true)
-    })
     public AssignmentResponse assignUnit(UUID dispatcherId, AssignmentRequest request) {
+        // The Redisson lock must span the ENTIRE transaction, including its
+        // commit. We therefore acquire it here, OUTSIDE the @Transactional
+        // boundary, and run the DB work via a self-proxy so the commit completes
+        // before the lock is released in finally. Releasing the lock inside the
+        // transactional method (before commit) let a waiting thread read stale,
+        // uncommitted state and double-assign the same unit.
         String lockKey = RedisCacheKeys.LOCK_UNIT_PREFIX + request.getUnitId();
         RLock lock = redissonClient.getLock(lockKey);
         boolean acquired = false;
@@ -77,30 +85,7 @@ public class AssignmentServiceImpl implements AssignmentService {
                 throw new ResourceLockedException("Unit is currently being assigned");
             }
             log.info("Lock acquired {}", lockKey);
-
-            EmergencyUnit unit = unitRepository.findById(request.getUnitId())
-                    .orElseThrow(() -> new ResourceNotFoundException("Unit", "id", request.getUnitId()));
-            if (!"AVAILABLE".equals(unit.getStatus())) {
-                throw new ResourceLockedException("Unit not available");
-            }
-
-            Incident incident = incidentRepository.findById(request.getIncidentId())
-                    .orElseThrow(() -> new ResourceNotFoundException("Incident", "id", request.getIncidentId()));
-            User dispatcher = userRepository.findById(dispatcherId)
-                    .orElseThrow(() -> new ResourceNotFoundException("User", "id", dispatcherId));
-
-            unit.setStatus("DISPATCHED");
-            unitRepository.save(unit);
-
-            Assignment assignment = new Assignment();
-            assignment.setIncident(incident);
-            assignment.setUnit(unit);
-            assignment.setAssignedBy(dispatcher);
-            assignment.setAssignedAt(OffsetDateTime.now());
-            Assignment saved = assignmentRepository.save(assignment);
-
-            auditLogger.log("UNIT_ASSIGNED", "ASSIGNMENT", saved.getId(), "SUCCESS");
-            return toResponse(saved);
+            return self.getObject().assignUnitTransactional(dispatcherId, request);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new ResourceLockedException("Interrupted while acquiring unit lock");
@@ -110,6 +95,42 @@ public class AssignmentServiceImpl implements AssignmentService {
                 log.info("Lock released {}", lockKey);
             }
         }
+    }
+
+    /**
+     * Transactional body of {@link #assignUnit}. MUST be invoked through the
+     * self-proxy (never directly) so the surrounding transaction commits before
+     * the caller releases the unit lock. Not part of the public service contract.
+     */
+    @Transactional
+    @Caching(evict = {
+            @CacheEvict(value = "resourcesAvail", allEntries = true),
+            @CacheEvict(value = "dashboard:summary", allEntries = true)
+    })
+    public AssignmentResponse assignUnitTransactional(UUID dispatcherId, AssignmentRequest request) {
+        EmergencyUnit unit = unitRepository.findById(request.getUnitId())
+                .orElseThrow(() -> new ResourceNotFoundException("Unit", "id", request.getUnitId()));
+        if (!"AVAILABLE".equals(unit.getStatus())) {
+            throw new ResourceLockedException("Unit not available");
+        }
+
+        Incident incident = incidentRepository.findById(request.getIncidentId())
+                .orElseThrow(() -> new ResourceNotFoundException("Incident", "id", request.getIncidentId()));
+        User dispatcher = userRepository.findById(dispatcherId)
+                .orElseThrow(() -> new ResourceNotFoundException("User", "id", dispatcherId));
+
+        unit.setStatus("DISPATCHED");
+        unitRepository.save(unit);
+
+        Assignment assignment = new Assignment();
+        assignment.setIncident(incident);
+        assignment.setUnit(unit);
+        assignment.setAssignedBy(dispatcher);
+        assignment.setAssignedAt(OffsetDateTime.now());
+        Assignment saved = assignmentRepository.save(assignment);
+
+        auditLogger.log("UNIT_ASSIGNED", "ASSIGNMENT", saved.getId(), "SUCCESS");
+        return toResponse(saved);
     }
 
     @Override

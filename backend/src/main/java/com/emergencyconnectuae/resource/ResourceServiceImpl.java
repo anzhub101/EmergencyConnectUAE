@@ -18,6 +18,7 @@ import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.cache.annotation.Caching;
@@ -49,13 +50,18 @@ public class ResourceServiceImpl implements ResourceService {
     private final EmergencyUnitRepository unitRepository;
     private final RedissonClient redissonClient;
     private final AuditLogger auditLogger;
+    // Self-reference (proxied bean) so the @Transactional body runs through the
+    // Spring proxy; ObjectProvider defers resolution to avoid a creation cycle.
+    private final ObjectProvider<ResourceServiceImpl> self;
 
     public ResourceServiceImpl(HospitalRepository hospitalRepository, EmergencyUnitRepository unitRepository,
-                               RedissonClient redissonClient, AuditLogger auditLogger) {
+                               RedissonClient redissonClient, AuditLogger auditLogger,
+                               ObjectProvider<ResourceServiceImpl> self) {
         this.hospitalRepository = hospitalRepository;
         this.unitRepository = unitRepository;
         this.redissonClient = redissonClient;
         this.auditLogger = auditLogger;
+        this.self = self;
     }
 
     @Override
@@ -97,14 +103,13 @@ public class ResourceServiceImpl implements ResourceService {
     }
 
     @Override
-    @Transactional
-    @Caching(evict = {
-            @CacheEvict(value = "resourceAvail", key = "#hospitalId"),
-            @CacheEvict(value = "resourcesAvail", allEntries = true),
-            @CacheEvict(value = "dashboard:summary", allEntries = true)
-    })
     public ResourceResponse reserveBed(UUID hospitalId) {
         // lock:bed:{hospitalId} (SRS 8.1) guards the bed-count critical section.
+        // The lock is acquired OUTSIDE the @Transactional boundary so it spans
+        // the commit: the transactional body runs via a self-proxy and commits
+        // before the lock is released in finally. Releasing before commit caused
+        // a lost update — two concurrent reserves decrementing from the same
+        // pre-commit baseline.
         String lockKey = RedisCacheKeys.LOCK_BED_PREFIX + hospitalId;
         RLock lock = redissonClient.getLock(lockKey);
         boolean acquired = false;
@@ -114,15 +119,7 @@ public class ResourceServiceImpl implements ResourceService {
                 throw new ResourceLockedException("Resource is currently being reserved");
             }
             log.info("Lock acquired {}", lockKey);
-
-            Hospital hospital = findHospital(hospitalId);
-            if (hospital.getAvailableBeds() == null || hospital.getAvailableBeds() <= 0) {
-                throw new ResourceLockedException("No available beds to reserve");
-            }
-            hospital.setAvailableBeds(hospital.getAvailableBeds() - 1);
-            Hospital saved = hospitalRepository.save(hospital);
-            auditLogger.log("RESOURCE_RESERVED", "RESOURCE", saved.getId(), "SUCCESS");
-            return toResponse(saved);
+            return self.getObject().reserveBedTransactional(hospitalId);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new ResourceLockedException("Interrupted while acquiring resource lock");
@@ -132,6 +129,28 @@ public class ResourceServiceImpl implements ResourceService {
                 log.info("Lock released {}", lockKey);
             }
         }
+    }
+
+    /**
+     * Transactional body of {@link #reserveBed}. MUST be invoked through the
+     * self-proxy so the transaction commits before the caller releases the bed
+     * lock. Not part of the public service contract.
+     */
+    @Transactional
+    @Caching(evict = {
+            @CacheEvict(value = "resourceAvail", key = "#hospitalId"),
+            @CacheEvict(value = "resourcesAvail", allEntries = true),
+            @CacheEvict(value = "dashboard:summary", allEntries = true)
+    })
+    public ResourceResponse reserveBedTransactional(UUID hospitalId) {
+        Hospital hospital = findHospital(hospitalId);
+        if (hospital.getAvailableBeds() == null || hospital.getAvailableBeds() <= 0) {
+            throw new ResourceLockedException("No available beds to reserve");
+        }
+        hospital.setAvailableBeds(hospital.getAvailableBeds() - 1);
+        Hospital saved = hospitalRepository.save(hospital);
+        auditLogger.log("RESOURCE_RESERVED", "RESOURCE", saved.getId(), "SUCCESS");
+        return toResponse(saved);
     }
 
     @Override

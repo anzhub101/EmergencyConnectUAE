@@ -9,8 +9,10 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
-        changeOrigin: true
+        target: 'https://localhost:8443',
+        changeOrigin: true,
+        // Backend uses a self-signed TLS cert in dev; don't reject it.
+        secure: false
       }
     }
   },

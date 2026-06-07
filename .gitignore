@@ -3,6 +3,12 @@
 **/.env
 !**/.env.example
 
+# TLS keystores / private keys — keep local, never commit
+*.p12
+*.jks
+*.key
+*.pem
+
 # Java / Maven
 backend/target/
 *.class

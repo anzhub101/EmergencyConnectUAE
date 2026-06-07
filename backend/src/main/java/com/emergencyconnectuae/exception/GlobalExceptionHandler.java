@@ -12,6 +12,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ControllerAdvice;
@@ -54,6 +55,18 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(MfaRequiredException.class)
     public ResponseEntity<Map<String, String>> handleMfa(MfaRequiredException ex) {
         return ResponseEntity.status(HttpStatus.FORBIDDEN).body(body("MFA_REQUIRED", ex.getMessage()));
+    }
+
+    /**
+     * Method-level @PreAuthorize denials throw AuthorizationDeniedException
+     * (a subclass of AccessDeniedException) at the controller method, where this
+     * @ControllerAdvice intercepts it before Spring Security's accessDeniedHandler
+     * can. Without this handler the generic Exception fallback below turned RBAC
+     * denials into 500s instead of 403s.
+     */
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<Map<String, String>> handleAccessDenied(AccessDeniedException ex) {
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(body("FORBIDDEN", "Insufficient privileges"));
     }
 
     @ExceptionHandler(InvalidStatusTransitionException.class)
